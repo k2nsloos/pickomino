@@ -4,24 +4,31 @@
 #include "constants.h"
 
 
-typedef struct {
+typedef struct
+{
     uint8_t face_counts[TOTAL_DICE_FACES];
+    double prob;
 } dice_state_s;
 
-typedef struct {
+typedef struct
+{
     dice_state_s elem;
     unsigned sum;
     unsigned dice_count;
 } dice_state_iterator_s;
 
+typedef struct
+{
+    dice_state_s* states;
+    size_t count;
+} dice_state_cache_s;
 
 void dice_state_iterator_init(dice_state_iterator_s* it, size_t dice_count);
 bool dice_state_iterator_is_end(const dice_state_iterator_s* it);
 void dice_state_iterator_incr(dice_state_iterator_s* it);
 
 const dice_state_s* dice_state_iterator_get(const dice_state_iterator_s* it);
-double dice_state_probability(const dice_state_s* it);
 
-dice_state_s* create_dice_states(size_t dice_count, size_t* act_len);
-
+dice_state_cache_s* dice_state_cache_create(size_t dice_count);
+void dice_state_cache_destroy(dice_state_cache_s* c);
 #endif

@@ -21,7 +21,6 @@ extern const uint8_t g_pickomino_roll_rewards[PICKOMINO_ROLL_REWARD_DIM];
 typedef enum pickomino_tile_state_ {
     PICKOMINO_TILE_AVAILABLE,
     PICKOMINO_TILE_OWNED,
-    PICKOMINO_TILE_OWNED_HIDDEN,
     PICKOMINO_TILE_REMOVED
 } pickomino_tile_state_e;
 

@@ -46,6 +46,7 @@ void pickomino_roll_action(pickomino_roll_state_s* r, const dice_state_s* dice, 
     r->score += dice->face_counts[action] * g_pickomino_face_scores[action];
     r->dices_remaining -= dice->face_counts[action];
     r->used_flags |= 1u << action;
+    r->roll_hist.face_counts[action] = dice->face_counts[action];
 }
 
 void pickomino_roll_format(const dice_state_s* d, char* buf, size_t max_len)
@@ -78,7 +79,6 @@ unsigned pickomino_roll_finalize(const pickomino_roll_state_s* r)
     return pickomino_is_finalizeable(r) ? r->score : PICKOMINO_ROLL_BUSTED;
 }
 
-
 void pickomino_game_init(pickomino_game_state_s* g, int players)
 {
     *g = (pickomino_game_state_s){.player_count = players};
@@ -108,31 +108,10 @@ static void pop_tile_stack(pickomino_game_state_s* g, size_t player_id)
 
 static void push_tile_stack(pickomino_game_state_s* g, size_t player_id, uint8_t tile)
 {
-    unsigned stack_size = g->player_stack_size[player_id];
-    if (stack_size) {
-        uint8_t top_tile = g->player_stacks[player_id][stack_size - 1];
-        g->tile_states[top_tile] = PICKOMINO_TILE_OWNED_HIDDEN;
-    }
-
+    unsigned stack_size = g->player_stack_size[player_id]++;
     g->tile_states[tile] = PICKOMINO_TILE_OWNED;
     g->player_stacks[player_id][stack_size] = tile;
     g->player_scores[player_id] += g_pickomino_roll_rewards[tile];
-    ++g->player_stack_size[player_id];
-}
-
-
-static uint8_t return_top_tile_player(pickomino_game_state_s* g, size_t player_id)
-{
-    uint8_t returned_tile = PICKOMINO_TILE_NONE;
-
-    if (g->player_stack_size[g->cur_player_id]) {
-        uint8_t idx = --g->player_stack_size[g->cur_player_id];
-        returned_tile = g->player_stacks[g->cur_player_id][idx];
-        g->tile_states[returned_tile] = PICKOMINO_TILE_AVAILABLE;
-        g->player_scores[g->cur_player_id] -= g_pickomino_roll_rewards[returned_tile];
-    }
-
-    return returned_tile;
 }
 
 static void remove_top_tile(pickomino_game_state_s* g, uint8_t returned_tile)

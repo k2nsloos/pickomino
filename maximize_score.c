@@ -1,3 +1,4 @@
+#include "pickomino.h"
 #include "dice_combinations.h"
 #include "random.h"
 #include <stdlib.h>
@@ -6,37 +7,35 @@
 #include <math.h>
 #include <assert.h>
 
-typedef struct
-{
-    double* value;
-    double* p_bust;
-    unsigned score;
-    unsigned dices_remaining;
-    unsigned used_flags;
-} game_state_s;
+#define TOTAL_USED_STATES 64
+#define REQUIRED_FACE (TOTAL_DICE_FACES - 1)
+#define MIN_STOP_SCORE 21
 
 typedef struct
 {
-    dice_state_s *states;
-    double *probs;
-    size_t count;
-} dice_state_cache_s;
+    double value;
+    double p_score[PICKOMINO_ROLL_REWARD_DIM];
+    double p_bust;
+} roll_stats_s;
 
 typedef struct
 {
-    double* values;
-    double* p_bust;
-    size_t min_score;
-    size_t min_dices_remaining;
+    roll_stats_s *values;
+    unsigned min_score;
+    unsigned score_dim;
+} roll_stats_dice_dim_s;
+
+typedef struct
+{
+    roll_stats_dice_dim_s* values;
+    size_t min_dice_remaining;
     size_t dice_dim;
-    size_t score_dim;
-} game_values_s;
+    size_t total_stats_count;
+} roll_stats_flags_dim_s;
 
-dice_state_cache_s s_state_caches[TOTAL_DICES];
-const uint8_t s_face_scores[TOTAL_DICE_FACES] = { 1, 2, 3, 4, 5, 5 };
-const char s_face_symbols[TOTAL_DICE_FACES] = { '1', '2', '3', '4', '5', 'W' };
-game_values_s *g_state;
-size_t g_state_size;
+static dice_state_cache_s* s_dice_states[PICKOMINO_TOTAL_DICES];
+static roll_stats_flags_dim_s s_roll_stats[TOTAL_USED_STATES];
+size_t g_total_roll_stats_count;
 
 static unsigned pop_count(unsigned v)
 {
@@ -45,136 +44,101 @@ static unsigned pop_count(unsigned v)
     return c;
 }
 
-static void find_game_state(game_state_s* s, unsigned score, unsigned dices_remaining, unsigned used_flags)
+static void roll_stats_dice_dim_init(roll_stats_dice_dim_s* l, size_t min_score, size_t max_score)
 {
-    game_values_s* values = &g_state[used_flags];
-    size_t score_idx = score - values->min_score;
-    size_t dices_idx = dices_remaining - values->min_dices_remaining;
-
-    size_t offset = dices_idx * values->score_dim + score_idx;
-    assert(score_idx < values->score_dim);
-    assert(dices_idx < values->dice_dim);
-
-    *s = (game_state_s) {.value = &values->values[offset],
-                         .p_bust = &values->p_bust[offset],
-                         .score = score,
-                         .dices_remaining = dices_remaining,
-                         .used_flags = used_flags
-    };
+    l->min_score = min_score;
+    l->score_dim = (max_score - min_score) + 1;
+    l->values = calloc(l->score_dim, sizeof(roll_stats_s));
 }
 
-static void get_game_state_by_idx(game_state_s* s, size_t game_idx)
+static void roll_stats_flags_dim_init(roll_stats_flags_dim_s* r, unsigned used_flags)
 {
-    uint16_t offset = game_idx;
-    uint8_t used_flags = game_idx >> 16;
-    assert(used_flags < TOTAL_USED_STATES);
-
-    game_values_s* values = &g_state[used_flags];
-
-    assert(offset < values->score_dim * values->dice_dim);
-    unsigned score = offset % values->score_dim + values->min_score;
-    unsigned dices_remaining = offset / values->score_dim + values->min_dices_remaining;
-
-    *s = (game_state_s) {
-        .value = &values->values[offset],
-        .p_bust = &values->p_bust[offset],
-        .score = score,
-        .dices_remaining = dices_remaining,
-        .used_flags = used_flags
-    };
-}
-
-
-static void setup_state_cache()
-{
-    for (size_t dice_idx = 0; dice_idx < TOTAL_DICES; ++dice_idx) {
-        dice_state_cache_s* cache = &s_state_caches[dice_idx];
-        cache->states = create_dice_states(dice_idx + 1, &cache->count);
-        cache->probs = calloc(cache->count, sizeof(double));
-        for (size_t state_idx = 0; state_idx < cache->count; ++state_idx) {
-            cache->probs[state_idx] = dice_state_probability(&cache->states[state_idx]);
-        }
-    }
-}
-
-static size_t prepare_game_values(game_values_s* v, unsigned flags)
-{
+    size_t min_dice_idx = SIZE_MAX;
+    size_t max_dice_idx = SIZE_MAX;
     size_t min_score = 0;
-    size_t max_dice_idx = 0;
     size_t min_dice_used = 0;
-    for (size_t idx = 0; idx < TOTAL_DICE_FACES; ++idx)
-    {
-        if (((1u << idx) & flags) == 0) continue;
+
+    for (size_t idx = 0; idx < TOTAL_DICE_FACES; ++idx) {
+        if (((1u << idx) & used_flags) == 0) continue;
+        if (min_dice_idx != SIZE_MAX) min_dice_idx = idx;
 
         ++min_dice_used;
         max_dice_idx = idx;
-        min_score += s_face_scores[idx];
+        min_score += g_pickomino_face_scores[idx];
     }
 
-    size_t max_dice = TOTAL_DICES - min_dice_used;
-    v->min_dices_remaining = flags ? 0 : TOTAL_DICES;
-    v->dice_dim = max_dice - v->min_dices_remaining + 1;
+    size_t max_dice_used = used_flags == 0 ? 0 : PICKOMINO_TOTAL_DICES;
+    size_t dice_dim = (max_dice_used - min_dice_used) + 1;
 
-    v->min_score = min_score;
-    //size_t max_score = min_score + max_dice * s_face_scores[max_dice_idx];
-    size_t max_score = MAX_SCORE;
-    v->score_dim = max_score - v->min_score + 1;
+    r->values = calloc(dice_dim, sizeof(roll_stats_dice_dim_s));
+    r->dice_dim = dice_dim;
+    r->min_dice_remaining = PICKOMINO_TOTAL_DICES - max_dice_used;
 
-    size_t state_size = v->score_dim * v->dice_dim;
-    v->values = calloc(state_size, sizeof(double));
-    v->p_bust = calloc(state_size, sizeof(double));
-
-    (void)max_dice_idx;
-    return state_size;
+    size_t min_score_per_dice = min_dice_idx == SIZE_MAX ? 0 : g_pickomino_face_scores[min_dice_idx];
+    size_t max_score_per_dice = max_dice_idx == SIZE_MAX ? 0 : g_pickomino_face_scores[max_dice_idx];
+    for (size_t idx = 0; idx < dice_dim; ++idx) {
+        size_t list_min_score = min_score + min_score_per_dice * (dice_dim - idx - 1);
+        size_t list_max_score = min_score + max_score_per_dice * (dice_dim - idx - 1);
+        roll_stats_dice_dim_init(&r->values[idx], list_min_score, list_max_score);
+        r->total_stats_count += r->values[idx].score_dim;
+    }
 }
 
-static size_t setup()
+static void setup()
 {
-    g_state_size = 0;
-    g_state = calloc(TOTAL_USED_STATES, sizeof(game_values_s));
-
-    for (size_t used_flag = 0; used_flag < TOTAL_USED_STATES; ++used_flag)
-    {
-        size_t sub_state_size = prepare_game_values(&g_state[used_flag], used_flag);
-        g_state_size += sub_state_size;
-
-        size_t mask = used_flag << 16;
-        for (size_t game_idx = 0; game_idx < sub_state_size; ++game_idx) {
-            game_state_s s;
-            get_game_state_by_idx(&s, mask | game_idx);
-
-            // If required face present we can always stop
-            if (s.used_flags & (1u << REQUIRED_FACE)) *s.value = s.score;
-        }
+    for (size_t dice_id = 0; dice_id < PICKOMINO_TOTAL_DICES; ++dice_id) {
+        s_dice_states[dice_id] = dice_state_cache_create(dice_id + 1);
     }
 
-    setup_state_cache();
-    return g_state_size;
+    g_total_roll_stats_count = 0;
+    for (unsigned flags = 0; flags < TOTAL_USED_STATES; ++flags) {
+        roll_stats_flags_dim_init(&s_roll_stats[flags], flags);
+        g_total_roll_stats_count += s_roll_stats[flags].total_stats_count;
+    }
 }
 
-static const char* format_state(const game_state_s* g)
+static roll_stats_s* find_roll_stats(const pickomino_roll_state_s* s)
+{
+    assert(s->used_flags < TOTAL_USED_STATES);
+    const roll_stats_flags_dim_s* l1 = &s_roll_stats[s->used_flags];
+
+    assert(s->dices_remaining - l1->min_dice_remaining < l1->dice_dim);
+    const roll_stats_dice_dim_s* l2 = &l1->values[s->dices_remaining - l1->min_dice_remaining];
+
+    assert(s->score - l2->min_score < l2->score_dim);
+    return &l2->values[s->score - l2->min_score];
+}
+
+roll_stats_dice_dim_s* find_roll_stats_dice_dim(unsigned used_flags, unsigned dices_remaining)
+{
+    assert(used_flags < TOTAL_USED_STATES);
+    const roll_stats_flags_dim_s* l1 = &s_roll_stats[used_flags];
+
+    assert(dices_remaining - l1->min_dice_remaining < l1->dice_dim);
+    return &l1->values[dices_remaining - l1->min_dice_remaining];
+}
+
+static const char* format_state(const pickomino_roll_state_s* state)
 {
     static char tpl[32];
+    roll_stats_s* stats = find_roll_stats(state);
     snprintf(tpl, sizeof(tpl),
              "(%d, %d, %.1f, %.2f %d%d%d%d%d%d)",
-             g->score,
-             g->dices_remaining,
-             *g->value,
-             *g->p_bust,
-             (bool)(g->used_flags & 1),
-             (bool)(g->used_flags & 2),
-             (bool)(g->used_flags & 4),
-             (bool)(g->used_flags & 8),
-             (bool)(g->used_flags & 16),
-             (bool)(g->used_flags & 32));
-
+             state->score,
+             state->dices_remaining,
+             stats->value,
+             stats->p_bust,
+             (bool)(state->used_flags & 1),
+             (bool)(state->used_flags & 2),
+             (bool)(state->used_flags & 4),
+             (bool)(state->used_flags & 8),
+             (bool)(state->used_flags & 16),
+             (bool)(state->used_flags & 32));
     return tpl;
 }
 
-static void update(const game_state_s* src_game)
+static void update(const pickomino_roll_state_s* src_game)
 {
-    game_state_s dst_game;
-
     bool has_required_face = src_game->used_flags & (1u << REQUIRED_FACE);
     bool is_allowed_to_stop = has_required_face && src_game->score >= MIN_STOP_SCORE;
     double state_stop_value = is_allowed_to_stop ? src_game->score : 0;
@@ -182,13 +146,13 @@ static void update(const game_state_s* src_game)
 
     double state_roll_value = 0;
     double state_roll_p_bust = 1.0;
+
     if (src_game->dices_remaining > 0 && src_game->used_flags != TOTAL_USED_STATES - 1) {
-        const dice_state_cache_s* dice_cache = &s_state_caches[src_game->dices_remaining - 1];
+        const dice_state_cache_s* dice_cache = s_dice_states[src_game->dices_remaining - 1];
         state_roll_p_bust = 0;
 
         for (size_t dice_idx = 0; dice_idx < dice_cache->count; ++dice_idx) {
             const dice_state_s* dice = &dice_cache->states[dice_idx];
-            double p = dice_cache->probs[dice_idx];
 
             bool have_action = false;
             double max_state_action_value = 0;
@@ -197,85 +161,71 @@ static void update(const game_state_s* src_game)
                 if (src_game->used_flags & (1u << action)) continue;
                 if (dice->face_counts[action] == 0) continue;
 
-                double new_score = src_game->score + s_face_scores[action] * dice->face_counts[action];
-                if (new_score > MAX_SCORE) break; // Unreachable state, don't care
+                pickomino_roll_state_s dst_game = *src_game;
+                pickomino_roll_action(&dst_game, dice, action);
+                roll_stats_s* dst_stats = find_roll_stats(&dst_game);
 
-                unsigned new_dice_remaining = src_game->dices_remaining - dice->face_counts[action];
-                unsigned new_used = src_game->used_flags | (1u << action);
-                find_game_state(&dst_game, new_score, new_dice_remaining, new_used);
-
-                if (!have_action || *dst_game.value > max_state_action_value) {
-                    max_state_action_value = *dst_game.value;
-                    max_state_action_p_bust = *dst_game.p_bust;
+                if (!have_action || dst_stats->value > max_state_action_value) {
+                    max_state_action_value = dst_stats->value;
+                    max_state_action_p_bust = dst_stats->p_bust;
                     have_action = true;
                 }
             }
 
-            state_roll_value += p * max_state_action_value;
-            state_roll_p_bust += p * max_state_action_p_bust;
+            state_roll_value += dice->prob * max_state_action_value;
+            state_roll_p_bust += dice->prob * max_state_action_p_bust;
         }
     }
 
-    double new_value = state_stop_value;
-    double new_p_bust = state_stop_p_bust;
-
+    double new_value, new_p_bust;
     if (state_roll_value > state_stop_value) {
         new_value = state_roll_value;
         new_p_bust = state_roll_p_bust;
+    } else {
+        new_value = state_stop_value;
+        new_p_bust = state_stop_p_bust;
     }
 
     // const char* state_str = format_state(src_game);
     // printf("  %s: %f -> %f\n", state_str, *src_game->value, new_value);
-    *src_game->value = new_value;
-    *src_game->p_bust = new_p_bust;
+    roll_stats_s* src_stats = find_roll_stats(src_game);
+    src_stats->value = new_value;
+    src_stats->p_bust = new_p_bust;
 }
-
-
 
 static const char* format_roll(const dice_state_s* d)
 {
     static char tpl[32];
-    char* cur = tpl;
-
-    for (size_t face_idx = TOTAL_DICE_FACES; face_idx--; ) {
-        for (size_t count = 0; count < d->face_counts[face_idx]; ++count) {
-            *cur++ = s_face_symbols[face_idx];
-            *cur++ = ' ';
-        }
-    }
-
-    if (cur != tpl) --cur;
-    *cur = 0;
+    pickomino_roll_format(d, tpl, sizeof(tpl));
     return tpl;
 }
 
 void do_random_roll(dice_state_s* result, size_t dices)
 {
-    assert(dices <= TOTAL_DICES);
+    assert(dices <= PICKOMINO_TOTAL_DICES);
 
-    dice_state_s tmp = {};
-    uint8_t rolls[TOTAL_DICES] = {};
+    dice_state_s tmp = {.face_counts = {}};
+    uint8_t rolls[PICKOMINO_TOTAL_DICES] = {};
     random_uniform(TOTAL_DICE_FACES, rolls, dices);
     for (size_t idx = 0; idx < dices; ++idx) {
-        ++tmp.face_counts[rolls[idx]];
+        ++(tmp.face_counts[rolls[idx]]);
     }
     *result = tmp;
 }
 
 static void play_game()
 {
-    game_state_s game;
-    game_state_s max_action;
-    game_state_s tmp;
+    pickomino_roll_state_s game = {0, PICKOMINO_TOTAL_DICES, 0, {}};
+    pickomino_roll_state_s max_action;
+    pickomino_roll_state_s tmp;
     size_t max_action_idx = 0;
-
-    find_game_state(&game, 0, TOTAL_DICES, 0);
 
     while (true)
     {
         printf("state: %s\n", format_state(&game));
 
-        if (*game.value == game.score) {
+
+        if (find_roll_stats(&game)->value == game.score) {
             printf("stop\n");
             break;
         }
@@ -287,23 +237,23 @@ static void play_game()
 
         bool have_action = false;
         double max_state_action_value = 0;
-        for (size_t action = 0; action < TOTAL_DICE_FACES; ++action) {
-            if (game.used_flags & (1u << action)) continue;
-            if (dice.face_counts[action] == 0) continue;
 
-            double new_score = game.score + s_face_scores[action] * dice.face_counts[action];
-            unsigned new_dice_remaining = game.dices_remaining - dice.face_counts[action];
-            unsigned new_used = game.used_flags | (1u << action);
-            find_game_state(&tmp, new_score, new_dice_remaining, new_used);
+        unsigned available_actions = pickomino_roll_available_actions(&game, &dice);
+        for (unsigned action = 0; available_actions; available_actions >>= 1, ++action) {
+            if ((available_actions & 0x1) == 0) continue;
 
-            if (!have_action || *tmp.value > max_state_action_value) {
+            tmp = game;
+            pickomino_roll_action(&tmp, &dice, action);
+            roll_stats_s* stats = find_roll_stats(&tmp);
+
+            if (!have_action || stats->value > max_state_action_value) {
                 max_action = tmp;
-                max_state_action_value = *tmp.value;
+                max_state_action_value = stats->value;
                 max_action_idx = action;
                 have_action = true;
             }
 
-            printf("action: %c -> %s\n", s_face_symbols[action], format_state(&tmp));
+            printf("action: %c -> %s\n", g_pickomino_face_symbols[action], format_state(&tmp));
         }
 
         if (!have_action) {
@@ -312,14 +262,14 @@ static void play_game()
         }
 
         game = max_action;
-        printf("do: %c\n\n", s_face_symbols[max_action_idx]);
+        printf("do: %c\n\n", g_pickomino_face_symbols[max_action_idx]);
     }
 }
 
 int main(int argc, char **argv)
 {
-    const size_t state_size = setup();
-    printf("State space size: %u\n", (unsigned)state_size);
+    setup();
+    printf("State space size: %u\n", (unsigned)g_total_roll_stats_count);
 
     size_t round = 1;
     for (size_t flag_count = TOTAL_DICE_FACES + 1; flag_count-- != 0; ++round)
@@ -328,14 +278,19 @@ int main(int argc, char **argv)
         for (size_t used_flags = 0; used_flags < TOTAL_USED_STATES; ++used_flags)
         {
             if (pop_count(used_flags) != flag_count) continue;
-            const game_values_s* v = &g_state[used_flags];
-            size_t sub_state_size = v->dice_dim * v->score_dim;
-            size_t mask = used_flags << 16;
-
-            for (size_t game_idx = 0; game_idx < sub_state_size; ++game_idx) {
-                game_state_s game;
-                get_game_state_by_idx(&game, game_idx | mask);
-                update(&game);
+            roll_stats_flags_dim_s* roll_stats_flags_dim = &s_roll_stats[used_flags];
+            for (size_t dice_id = 0; dice_id < roll_stats_flags_dim->dice_dim; ++dice_id) {
+                roll_stats_dice_dim_s* roll_stats_dice_dim = &roll_stats_flags_dim->values[dice_id];
+                size_t dice_remaining = roll_stats_flags_dim->min_dice_remaining + dice_id;
+                for (size_t score_id = 0; score_id < roll_stats_dice_dim->score_dim; ++score_id) {
+                    pickomino_roll_state_s state = {
+                        .dices_remaining = dice_remaining,
+                        .score = roll_stats_dice_dim->min_score + score_id,
+                        .used_flags = used_flags,
+                        .roll_hist = {},
+                    };
+                    update(&state);
+                }
             }
         }
     }

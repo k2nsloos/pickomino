@@ -21,7 +21,7 @@ build/%.o: %.c
 	@echo "[CC]   $<"
 	@$(CC) -c $(CFLAGS) -o $@ $<
 
-build/maximize_score: build/maximize_score.o build/dice_combinations.o build/random.o
+build/maximize_score: build/maximize_score.o build/dice_combinations.o build/random.o build/pickomino.o
 	@echo "[Link] $@"
 	@$(CC) $(CFLAGS) -o $@ $^ -lm
 
